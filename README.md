@@ -35,6 +35,7 @@ fingate/
 cd backend
 python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
+(Root Directory - backend)
 
 cp ../.env.example ../.env
 # .env 열어서 GEMINI_API_KEY 입력 (https://aistudio.google.com/apikey)
