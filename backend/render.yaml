@@ -1,0 +1,29 @@
+# Render Blueprint - 한 번 push 하면 Render가 알아서 배포
+# https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: fingate-backend
+    runtime: python
+    region: singapore  # 한국과 가장 가까움
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false  # Render 대시보드에서 직접 입력
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash-lite
+      - key: ADMIN_TOKEN
+        generateValue: true  # Render가 랜덤 생성
+      - key: DATABASE_URL
+        value: sqlite:////tmp/fingate.db  # Render 무료는 영구 디스크 없어서 /tmp 사용
+      - key: CORS_ORIGINS
+        value: "*"  # v0.1; 앱 배포 후 좁히기
+      - key: ENV
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
+      - key: PYTHON_VERSION
+        value: "3.11.9"

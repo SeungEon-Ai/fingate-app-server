@@ -1,0 +1,41 @@
+name: Daily News Fetch
+
+# 매일 한국시간 06:00 (UTC 21:00) 실행
+# 필요 시 수동 실행도 가능 (Actions 탭 → Run workflow)
+on:
+  schedule:
+    - cron: "0 21 * * *"
+  workflow_dispatch:  # 수동 트리거
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger backend fetch endpoint
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        run: |
+          if [ -z "$BACKEND_URL" ] || [ -z "$ADMIN_TOKEN" ]; then
+            echo "::error::BACKEND_URL or ADMIN_TOKEN secret not set"
+            exit 1
+          fi
+
+          # Render 무료는 sleep 상태일 수 있어서 timeout 넉넉히
+          echo "Calling $BACKEND_URL/admin/fetch ..."
+          RESPONSE=$(curl -sS -w "\nHTTP_CODE:%{http_code}" \
+            --max-time 120 \
+            -X POST "$BACKEND_URL/admin/fetch" \
+            -H "Authorization: Bearer $ADMIN_TOKEN" \
+            -H "Content-Type: application/json")
+
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1 | sed 's/HTTP_CODE://')
+          BODY=$(echo "$RESPONSE" | sed '$d')
+
+          echo "Response: $BODY"
+          echo "HTTP code: $HTTP_CODE"
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "::error::Fetch failed with HTTP $HTTP_CODE"
+            exit 1
+          fi

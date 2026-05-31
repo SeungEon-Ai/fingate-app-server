@@ -1,0 +1,35 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment
+venv/
+backend/venv/
+.venv/
+
+# Environment variables
+.env
+backend/.env
+
+# Database
+*.db
+backend/*.db
+fingate.db
+backend/fingate.db
+
+# Logs
+*.log
+
+# OS / IDE
+.DS_Store
+.vscode/
+.idea/
+
+# Flutter build files if app is later added
+build/
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
