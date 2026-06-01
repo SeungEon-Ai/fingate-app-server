@@ -142,20 +142,16 @@ def _get_title(item: Any) -> str:
 def _normalize_title(title: str) -> str:
     text = title.lower()
 
-    # 괄호 제거
     text = re.sub(r"\[[^\]]+\]", " ", text)
     text = re.sub(r"\([^)]*\)", " ", text)
 
-    # 자주 나오는 표현 통일
     text = text.replace("2천조", "2000조")
     text = text.replace("2천 조", "2000조")
     text = text.replace("시총", "시가총액")
     text = re.sub(r"시가\s*총액", "시가총액", text)
 
-    # 숫자 쉼표 제거
     text = re.sub(r"(\d),(\d)", r"\1\2", text)
 
-    # 특수문자 제거
     text = re.sub(r"[\"'‘’“”·ㆍ….,!?;:~\-_/|↑↓]", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
 
@@ -180,7 +176,6 @@ def _tokens(title: str) -> set[str]:
         token = token.replace("2000조원", "2000조")
         tokens.add(token)
 
-    # 붙어 있는 복합어 보정
     if "한화에어로스페이스" in normalized:
         tokens.add("한화에어로스페이스")
 
@@ -204,7 +199,6 @@ def _extract_entities(title: str) -> set[str]:
         if entity.lower() in normalized:
             entities.add(entity.lower())
 
-    # 한국 기업명 패턴 일부 보정
     if "한화에어로스페이스" in normalized:
         entities.add("한화에어로스페이스")
 
@@ -226,14 +220,17 @@ def _event_groups(title: str) -> set[str]:
 
 def _char_ngrams(text: str, n: int = 2) -> set[str]:
     text = re.sub(r"\s+", "", _normalize_title(text))
+
     if len(text) < n:
         return {text} if text else set()
+
     return {text[i : i + n] for i in range(len(text) - n + 1)}
 
 
 def _jaccard(a: set[str], b: set[str]) -> float:
     if not a or not b:
         return 0.0
+
     return len(a & b) / len(a | b)
 
 
@@ -262,9 +259,16 @@ def is_duplicate_news(a: Any, b: Any) -> bool:
     events_a = _event_groups(title_a)
     events_b = _event_groups(title_b)
 
-    # 1. 같은 주요 기업/대상 + 같은 이벤트 유형이면 중복
-    # 예: 한화에어로스페이스 + accident
-    if entities_a and entities_b and (entities_a & entities_b) and events_a and events_b and (events_a & events_b):
+    # 1. 사고/폭발/사망 같은 동일 사건만 강하게 묶는다.
+    # 주가 상승/하락 뉴스는 같은 기업이라도 서로 다른 이슈일 수 있으므로
+    # 여기서 무조건 중복 처리하지 않는다.
+    if (
+        entities_a
+        and entities_b
+        and (entities_a & entities_b)
+        and "accident" in events_a
+        and "accident" in events_b
+    ):
         return True
 
     # 2. 강한 이벤트 조합 직접 처리
@@ -291,7 +295,6 @@ def is_duplicate_news(a: Any, b: Any) -> bool:
         return True
 
     # 5. 글자 2-gram 유사도
-    # 한국어 제목은 띄어쓰기/표현 차이 때문에 토큰만으로 부족할 때가 있음
     ngram_jaccard = _jaccard(_char_ngrams(title_a), _char_ngrams(title_b))
     if ngram_jaccard >= 0.48:
         return True
@@ -305,6 +308,7 @@ def dedupe_collected_news(items: List[Any]) -> List[Any]:
     for item in items:
         if any(is_duplicate_news(item, existing) for existing in result):
             continue
+
         result.append(item)
 
     return result
@@ -316,6 +320,7 @@ def dedupe_news_dicts(items: List[dict]) -> List[dict]:
     for item in items:
         if any(is_duplicate_news(item, existing) for existing in result):
             continue
+
         result.append(item)
 
     return result

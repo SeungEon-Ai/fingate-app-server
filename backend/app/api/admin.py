@@ -21,6 +21,7 @@ from app.services import news_collector
 from app.services.daily_cache import save_daily_news
 from app.services.llm_processor import process_news_batch
 from app.services.duplicate_filter import dedupe_collected_news
+from app.services.news_ranker import rank_news_items
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -59,33 +60,39 @@ def _chunk_list(items: list, size: int):
     dependencies=[Depends(verify_admin)],
 )
 def trigger_fetch():
-    """RSS 수집 → Gemini 배치 요약 → daily_news.json 갱신."""
+    """RSS 수집 → 중복 제거 → 금융 뉴스 우선 정렬 → Gemini 배치 요약 → daily_news.json 갱신."""
     logger.info("=== Daily fetch job started ===")
 
     collected = news_collector.fetch_all()
 
-# 1차: URL 기준 중복 제거
-url_unique_items = []
-seen_urls = set()
+    # 1차: URL 기준 중복 제거
+    url_unique_items = []
+    seen_urls = set()
 
-for item in collected:
-    if item.url in seen_urls:
-        continue
-    seen_urls.add(item.url)
-    url_unique_items.append(item)
+    for item in collected:
+        if item.url in seen_urls:
+            continue
 
-# 2차: 제목 유사도 기준 중복 제거
-unique_items = dedupe_collected_news(url_unique_items)
+        seen_urls.add(item.url)
+        url_unique_items.append(item)
 
-logger.info(
-    "Dedup phase: collected=%d url_unique=%d title_unique=%d removed=%d",
-    len(collected),
-    len(url_unique_items),
-    len(unique_items),
-    len(collected) - len(unique_items),
-)
+    # 2차: 제목 유사도 기준 중복 제거
+    unique_items = dedupe_collected_news(url_unique_items)
+
+    # 3차: 금융 뉴스 우선순위 정렬
+    ranked_items = rank_news_items(unique_items)
+
+    logger.info(
+        "Dedup/rank phase: collected=%d url_unique=%d title_unique=%d removed=%d",
+        len(collected),
+        len(url_unique_items),
+        len(unique_items),
+        len(collected) - len(unique_items),
+    )
+
     # Gemini 요약 대상 제한
-    targets = unique_items[:AI_PROCESS_LIMIT]
+    # 단순히 RSS 앞 순서가 아니라 금융 관련성이 높은 뉴스부터 선택
+    targets = ranked_items[:AI_PROCESS_LIMIT]
 
     # process_news_batch가 id/title/source/raw_summary를 가진 객체를 기대하므로
     # SimpleNamespace로 임시 입력 객체를 만든다.
@@ -101,6 +108,7 @@ logger.info(
             raw_summary=item.raw_summary,
             published_at=item.published_at,
         )
+
         batch_inputs.append(obj)
         id_to_raw[idx] = item
 
@@ -166,9 +174,10 @@ logger.info(
     save_daily_news(daily_news)
 
     logger.info(
-        "Daily cache saved: collected=%d unique=%d processed=%d errors=%d",
+        "Daily cache saved: collected=%d unique=%d ranked=%d processed=%d errors=%d",
         len(collected),
         len(unique_items),
+        len(ranked_items),
         processed,
         errors,
     )
