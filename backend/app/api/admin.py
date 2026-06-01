@@ -1,33 +1,33 @@
 """
-관리자 엔드포인트 (cron / 트리거).
+관리자 엔드포인트.
 
 POST /admin/fetch
 - RSS 수집
-- DB 저장
 - Gemini 배치 요약
+- DB 저장 대신 daily_news.json 파일 갱신
 
 보안:
 Authorization: Bearer <ADMIN_TOKEN> 헤더 필요.
 """
+from types import SimpleNamespace
+
 from fastapi import APIRouter, Depends, Header, HTTPException, status
-from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.core.exceptions import LLMError
 from app.core.logger import get_logger
-from app.database import get_db
 from app.schemas.news import FetchResponse
-from app.services import news_collector, news_repository
+from app.services import news_collector
+from app.services.daily_cache import save_daily_news
 from app.services.llm_processor import process_news_batch
+from app.services.duplicate_filter import dedupe_collected_news
 
 logger = get_logger(__name__)
 router = APIRouter()
 
 
-# Gemini 무료 할당량을 고려한 기본값
-# 10개씩 묶으면 뉴스 50개를 Gemini 5번 호출로 처리 가능
 BATCH_SIZE = 10
-AI_PROCESS_LIMIT = 10
+AI_PROCESS_LIMIT = 30
 
 
 def verify_admin(authorization: str | None = Header(None)) -> None:
@@ -58,70 +58,74 @@ def _chunk_list(items: list, size: int):
     response_model=FetchResponse,
     dependencies=[Depends(verify_admin)],
 )
-def trigger_fetch(db: Session = Depends(get_db)):
-    """RSS 수집 → DB 저장 → LLM 배치 처리.
+def trigger_fetch():
+    """RSS 수집 → Gemini 배치 요약 → daily_news.json 갱신."""
+    logger.info("=== Daily fetch job started ===")
 
-    매일 아침 6시 자동 실행을 기준으로 사용.
-    """
-    logger.info("=== Fetch job started ===")
-
-    # 1단계: RSS 수집
     collected = news_collector.fetch_all()
 
-    inserted = 0
-    skipped = 0
+# 1차: URL 기준 중복 제거
+url_unique_items = []
+seen_urls = set()
 
-    for item in collected:
-        if news_repository.url_exists(db, item.url):
-            skipped += 1
-            continue
+for item in collected:
+    if item.url in seen_urls:
+        continue
+    seen_urls.add(item.url)
+    url_unique_items.append(item)
 
-        if news_repository.insert_raw(db, item):
-            inserted += 1
-        else:
-            skipped += 1
+# 2차: 제목 유사도 기준 중복 제거
+unique_items = dedupe_collected_news(url_unique_items)
 
-    logger.info("RSS phase: inserted=%d, skipped=%d", inserted, skipped)
+logger.info(
+    "Dedup phase: collected=%d url_unique=%d title_unique=%d removed=%d",
+    len(collected),
+    len(url_unique_items),
+    len(unique_items),
+    len(collected) - len(unique_items),
+)
+    # Gemini 요약 대상 제한
+    targets = unique_items[:AI_PROCESS_LIMIT]
 
-    # 2단계: LLM 배치 처리
-    # 최신 미처리 뉴스 중 최대 AI_PROCESS_LIMIT개만 처리
-    unprocessed = news_repository.find_unprocessed(db, limit=AI_PROCESS_LIMIT)
+    # process_news_batch가 id/title/source/raw_summary를 가진 객체를 기대하므로
+    # SimpleNamespace로 임시 입력 객체를 만든다.
+    batch_inputs = []
+    id_to_raw = {}
 
+    for idx, item in enumerate(targets, start=1):
+        obj = SimpleNamespace(
+            id=idx,
+            source=item.source,
+            title=item.title,
+            url=item.url,
+            raw_summary=item.raw_summary,
+            published_at=item.published_at,
+        )
+        batch_inputs.append(obj)
+        id_to_raw[idx] = item
+
+    processed_results = {}
     processed = 0
     errors = 0
 
     logger.info(
         "LLM batch phase: targets=%d, batch_size=%d",
-        len(unprocessed),
+        len(batch_inputs),
         BATCH_SIZE,
     )
 
-    for batch in _chunk_list(unprocessed, BATCH_SIZE):
+    for batch in _chunk_list(batch_inputs, BATCH_SIZE):
         batch_ids = [news.id for news in batch]
 
         try:
             results = process_news_batch(batch)
-
-            batch_processed = 0
-            for news in batch:
-                result = results.get(news.id)
-
-                if result is None:
-                    logger.warning(
-                        "LLM batch missing result for news id=%d",
-                        news.id,
-                    )
-                    errors += 1
-                    continue
-
-                news_repository.apply_processing(db, news.id, result)
-                processed += 1
-                batch_processed += 1
+            processed_results.update(results)
+            processed += len(results)
 
             logger.info(
                 "LLM batch done: ids=%s processed=%d",
                 batch_ids,
-                batch_processed,
+                len(results),
             )
 
         except LLMError as e:
@@ -131,16 +135,48 @@ def trigger_fetch(db: Session = Depends(get_db)):
                 e,
             )
             errors += len(batch)
-
-            # 할당량 초과나 API 오류가 나면 뒤 배치도 연쇄 실패 가능성이 높으므로 중단
             break
 
-    logger.info("LLM phase: processed=%d, errors=%d", processed, errors)
-    logger.info("=== Fetch job done ===")
+    # 앱에 내려줄 오늘 뉴스 JSON 만들기
+    daily_news = []
+
+    for obj in batch_inputs:
+        raw_item = id_to_raw[obj.id]
+        result = processed_results.get(obj.id)
+
+        # Gemini 실패 시에도 제목/출처/원문 링크는 보여줄 수 있게 저장
+        daily_news.append(
+            {
+                "id": obj.id,
+                "source": raw_item.source,
+                "title": raw_item.title,
+                "url": raw_item.url,
+                "summary": result.summary if result else "",
+                "context": result.context if result else "",
+                "importance": result.importance if result else 1,
+                "tags": result.tags if result else [],
+                "published_at": (
+                    raw_item.published_at.isoformat()
+                    if raw_item.published_at
+                    else None
+                ),
+            }
+        )
+
+    save_daily_news(daily_news)
+
+    logger.info(
+        "Daily cache saved: collected=%d unique=%d processed=%d errors=%d",
+        len(collected),
+        len(unique_items),
+        processed,
+        errors,
+    )
+    logger.info("=== Daily fetch job done ===")
 
     return FetchResponse(
-        collected=inserted,
+        collected=len(unique_items),
         processed=processed,
-        skipped=skipped,
+        skipped=max(0, len(unique_items) - len(targets)),
         errors=errors,
     )

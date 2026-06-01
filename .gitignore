@@ -33,3 +33,7 @@ build/
 .flutter-plugins
 .flutter-plugins-dependencies
 .packages
+
+# Daily generated cache
+daily_news.json
+backend/daily_news.json
